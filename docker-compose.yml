@@ -1,0 +1,37 @@
+networks:
+  web:
+    external: true
+    name: domjudge_web
+  internal:
+    driver: bridge
+
+services:
+  aglms-api:
+    build: ./backend
+    container_name: aglms-api
+    env_file: .env
+    networks:
+      - web
+      - internal
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=domjudge_web"
+      - "traefik.http.routers.aglms.rule=Host(`api.compcode.cloud`)"
+      - "traefik.http.routers.aglms.entrypoints=websecure"
+      - "traefik.http.routers.aglms.tls=true"
+      - "traefik.http.routers.aglms.tls.certresolver=le"
+      - "traefik.http.services.aglms.loadbalancer.server.port=8000"
+
+  aglms-db:
+    image: postgres:16
+    container_name: aglms-db
+    env_file: .env
+    volumes:
+      - aglms_db_data:/var/lib/postgresql/data
+    networks:
+      - internal
+    restart: unless-stopped
+
+volumes:
+  aglms_db_data:
