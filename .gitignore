@@ -7,3 +7,4 @@ backend/lti_config.json
 .idea/
 .DS_Store
 *.log
+.idea
