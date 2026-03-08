@@ -12,3 +12,5 @@ Push to `main` → auto-deploys to https://api.compcode.cloud
 ## Secret files (never committed)
 - `backend/lti_config.json` — LTI 1.3 RSA keys + Canvas config
 - `.env` — database credentials and app secrets
+
+
