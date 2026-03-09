@@ -4,12 +4,13 @@ import uuid
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 
 from pylti1p3.cookie import CookieService
 from pylti1p3.message_launch import MessageLaunch
 from pylti1p3.oidc_login import OIDCLogin
+from pylti1p3.redirect import Redirect
 from pylti1p3.request import Request as LTIRequest
 from pylti1p3.session import SessionService
 from pylti1p3.tool_config import ToolConfDict
@@ -35,7 +36,7 @@ app.add_middleware(
     SessionMiddleware,
     secret_key=SECRET_KEY,
     https_only=True,
-    same_site="none",  # Required for cross-site iframe (Canvas embeds AGLMS)
+    same_site="none",
 )
 
 
@@ -72,16 +73,37 @@ class FastAPICookieService(CookieService):
         self._session[name] = value
 
 
-class FastAPIMessageLaunch(MessageLaunch):
-    pass
+class FastAPIRedirect(Redirect):
+    """Redirect object returned by get_redirect() — used by pylti1p3 internally."""
+
+    def __init__(self, location: str):
+        self._location = location
+
+    def do_redirect(self) -> Response:
+        return RedirectResponse(url=self._location, status_code=302)
+
+    def do_js_redirect(self) -> Response:
+        # JS redirect works inside iframes where HTTP redirects are blocked
+        html = f'<script>window.location="{self._location}";</script>'
+        return HTMLResponse(content=html)
+
+    def set_redirect_url(self, location: str):
+        self._location = location
+
+    def get_redirect_url(self) -> str:
+        return self._location
 
 
 class FastAPIOIDCLogin(OIDCLogin):
-    def get_redirect(self, url: str):
-        return RedirectResponse(url=url, status_code=302)
+    def get_redirect(self, url: str) -> FastAPIRedirect:
+        return FastAPIRedirect(url)
 
-    def set_redirect_url_cookie(self, cookie_name: str, val: str):
-        pass
+    def get_response(self, html: str) -> Response:
+        return HTMLResponse(content=html)
+
+
+class FastAPIMessageLaunch(MessageLaunch):
+    pass
 
 
 # ── Tool config loader ────────────────────────────────────────────────────────
@@ -157,9 +179,10 @@ async def lti_login(request: Request):
         oidc = FastAPIOIDCLogin(
             lti_request, get_tool_conf(),
             session_service=session_service,
-            cookie_service=cookie_service
+            cookie_service=cookie_service,
         )
-        return oidc.enable_check_cookies().redirect("https://api.compcode.cloud/lti/launch")
+        # js_redirect=True is required for iframe context — HTTP redirects are blocked cross-origin
+        return oidc.redirect("https://api.compcode.cloud/lti/launch", js_redirect=True)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"OIDC login error: {str(e)}")
 
@@ -178,7 +201,7 @@ async def lti_launch(request: Request):
         launch = FastAPIMessageLaunch(
             lti_request, get_tool_conf(),
             session_service=session_service,
-            cookie_service=cookie_service
+            cookie_service=cookie_service,
         )
         launch_data = launch.get_launch_data()
 
