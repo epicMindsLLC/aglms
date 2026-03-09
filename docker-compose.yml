@@ -10,6 +10,8 @@ services:
     build: ./backend
     container_name: aglms-api
     env_file: .env
+    volumes:
+      - ./backend/lti_config.json:/app/lti_config.json:ro
     networks:
       - web
       - internal
