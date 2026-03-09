@@ -31,7 +31,12 @@ app.add_middleware(
 )
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=True)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SECRET_KEY,
+    https_only=True,
+    same_site="none",  # Required for cross-site iframe (Canvas embeds AGLMS)
+)
 
 
 # ── pylti1p3 FastAPI adapters ─────────────────────────────────────────────────
