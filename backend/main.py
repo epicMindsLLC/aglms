@@ -11,7 +11,7 @@ from pylti1p3.cookie import CookieService
 from pylti1p3.message_launch import MessageLaunch
 from pylti1p3.oidc_login import OIDCLogin
 from pylti1p3.request import Request as LTIRequest
-from pylti1p3.tool_config import ToolConfJsonFile
+from pylti1p3.tool_config import ToolConfDict
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
@@ -36,8 +36,6 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=True)
 # ── pylti1p3 FastAPI adapters ─────────────────────────────────────────────────
 
 class FastAPILTIRequest(LTIRequest):
-    """Wraps a Starlette/FastAPI Request for pylti1p3."""
-
     def __init__(self, request: Request, session: dict, body: dict = None):
         super().__init__()
         self._request = request
@@ -58,8 +56,6 @@ class FastAPILTIRequest(LTIRequest):
 
 
 class FastAPICookieService(CookieService):
-    """Cookie service backed by the session middleware."""
-
     def __init__(self, session: dict):
         self._session = session
 
@@ -75,19 +71,51 @@ class FastAPIMessageLaunch(MessageLaunch):
 
 
 class FastAPIOIDCLogin(OIDCLogin):
-
     def get_redirect(self, url: str):
         return RedirectResponse(url=url, status_code=302)
 
     def set_redirect_url_cookie(self, cookie_name: str, val: str):
-        pass  # handled via session
+        pass
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Tool config loader ────────────────────────────────────────────────────────
 
-def get_tool_conf():
+def get_tool_conf() -> ToolConfDict:
+    """Load LTI config from lti_config.json and build a ToolConfDict with inline keys."""
     path = os.path.join(os.path.dirname(__file__), "lti_config.json")
-    return ToolConfJsonFile(path)
+    with open(path) as f:
+        raw = json.load(f)
+
+    # Build config dict for ToolConfDict (no file paths needed)
+    config = {}
+    for iss, entries in raw.items():
+        config[iss] = []
+        for entry in entries:
+            config[iss].append({
+                "default":        entry.get("default", True),
+                "client_id":      entry["client_id"],
+                "auth_login_url": entry["auth_login_url"],
+                "auth_token_url": entry["auth_token_url"],
+                "auth_audience":  entry.get("auth_audience"),
+                "key_set_url":    entry.get("key_set_url"),
+                "key_set":        entry.get("key_set"),
+                "deployment_ids": entry.get("deployment_ids", []),
+            })
+
+    tool_conf = ToolConfDict(config)
+
+    # Inject keys directly — no file paths required
+    for iss, entries in raw.items():
+        for entry in entries:
+            client_id   = entry["client_id"]
+            private_key = entry.get("private_key", "")
+            public_key  = entry.get("public_key", "")
+            if private_key:
+                tool_conf.set_private_key(iss, private_key, client_id=client_id)
+            if public_key:
+                tool_conf.set_public_key(iss, public_key, client_id=client_id)
+
+    return tool_conf
 
 
 # ── Health & Root ─────────────────────────────────────────────────────────────
@@ -106,14 +134,12 @@ def root():
 
 @app.get("/lti/jwks")
 def jwks():
-    """Serve public JWK set so Canvas can verify our signatures."""
     return JSONResponse(get_tool_conf().get_jwks())
 
 
 @app.get("/lti/login")
 @app.post("/lti/login")
 async def lti_login(request: Request):
-    """OIDC login initiation — Canvas redirects here first."""
     session = request.session
     body = {}
     if request.method == "POST":
@@ -132,7 +158,6 @@ async def lti_login(request: Request):
 
 @app.post("/lti/launch")
 async def lti_launch(request: Request):
-    """LTI launch — validates JWT from Canvas and renders AGLMS UI."""
     session = request.session
     form = await request.form()
     body = dict(form)
@@ -154,7 +179,7 @@ async def lti_launch(request: Request):
         is_instructor = any("Instructor" in r or "Administrator" in r for r in roles)
 
         role_label = "👩‍🏫 Instructor" if is_instructor else "🎓 Student"
-        role_bg = "#dcfce7" if is_instructor else "#fef3c7"
+        role_bg    = "#dcfce7" if is_instructor else "#fef3c7"
         role_color = "#166534" if is_instructor else "#92400e"
 
         html = f"""<!DOCTYPE html>
