@@ -11,6 +11,7 @@ from pylti1p3.cookie import CookieService
 from pylti1p3.message_launch import MessageLaunch
 from pylti1p3.oidc_login import OIDCLogin
 from pylti1p3.request import Request as LTIRequest
+from pylti1p3.session import SessionService
 from pylti1p3.tool_config import ToolConfDict
 
 # ── App setup ─────────────────────────────────────────────────────────────────
@@ -81,12 +82,10 @@ class FastAPIOIDCLogin(OIDCLogin):
 # ── Tool config loader ────────────────────────────────────────────────────────
 
 def get_tool_conf() -> ToolConfDict:
-    """Load LTI config from lti_config.json and build a ToolConfDict with inline keys."""
     path = os.path.join(os.path.dirname(__file__), "lti_config.json")
     with open(path) as f:
         raw = json.load(f)
 
-    # Build config dict for ToolConfDict (no file paths needed)
     config = {}
     for iss, entries in raw.items():
         config[iss] = []
@@ -104,7 +103,6 @@ def get_tool_conf() -> ToolConfDict:
 
     tool_conf = ToolConfDict(config)
 
-    # Inject keys directly — no file paths required
     for iss, entries in raw.items():
         for entry in entries:
             client_id   = entry["client_id"]
@@ -147,10 +145,15 @@ async def lti_login(request: Request):
         body = dict(form)
 
     lti_request = FastAPILTIRequest(request, session, body)
+    session_service = SessionService(lti_request)
     cookie_service = FastAPICookieService(session)
 
     try:
-        oidc = FastAPIOIDCLogin(lti_request, get_tool_conf(), cookie_service=cookie_service)
+        oidc = FastAPIOIDCLogin(
+            lti_request, get_tool_conf(),
+            session_service=session_service,
+            cookie_service=cookie_service
+        )
         return oidc.enable_check_cookies().redirect("https://api.compcode.cloud/lti/launch")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"OIDC login error: {str(e)}")
@@ -163,10 +166,15 @@ async def lti_launch(request: Request):
     body = dict(form)
 
     lti_request = FastAPILTIRequest(request, session, body)
+    session_service = SessionService(lti_request)
     cookie_service = FastAPICookieService(session)
 
     try:
-        launch = FastAPIMessageLaunch(lti_request, get_tool_conf(), cookie_service=cookie_service)
+        launch = FastAPIMessageLaunch(
+            lti_request, get_tool_conf(),
+            session_service=session_service,
+            cookie_service=cookie_service
+        )
         launch_data = launch.get_launch_data()
 
         user_name = launch_data.get("name", "Student")
