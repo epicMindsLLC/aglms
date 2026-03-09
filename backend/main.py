@@ -2,111 +2,17 @@ import json
 import os
 import uuid
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from starlette.middleware.sessions import SessionMiddleware
-
-from pylti1p3.cookie import CookieService
-from pylti1p3.message_launch import MessageLaunch
-from pylti1p3.oidc_login import OIDCLogin
-from pylti1p3.redirect import Redirect
-from pylti1p3.request import Request as LTIRequest
-from pylti1p3.session import SessionService
+from flask import Flask, jsonify, request, session
+from pylti1p3.contrib.flask import FlaskCookieService, FlaskMessageLaunch, FlaskOIDCLogin, FlaskRequest, FlaskSessionService
 from pylti1p3.tool_config import ToolConfDict
 
-# ── App setup ─────────────────────────────────────────────────────────────────
-
-app = FastAPI(
-    title="AGLMS API",
-    description="Adaptive Gamified Learning Management System - CS6460 Spring 2026",
-    version="0.1.0",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=SECRET_KEY,
-    https_only=True,
-    same_site="none",
-)
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
+app.config["SESSION_COOKIE_SAMESITE"] = "None"
+app.config["SESSION_COOKIE_SECURE"] = True
 
 
-# ── pylti1p3 FastAPI adapters ─────────────────────────────────────────────────
-
-class FastAPILTIRequest(LTIRequest):
-    def __init__(self, request: Request, session: dict, body: dict = None):
-        super().__init__()
-        self._request = request
-        self._session = session
-        self._body = body or {}
-
-    @property
-    def session(self):
-        return self._session
-
-    def get_param(self, key: str):
-        if self._request.method == "GET":
-            return self._request.query_params.get(key)
-        return self._body.get(key)
-
-    def is_secure(self) -> bool:
-        return self._request.url.scheme == "https"
-
-
-class FastAPICookieService(CookieService):
-    def __init__(self, session: dict):
-        self._session = session
-
-    def get_cookie(self, name: str):
-        return self._session.get(name)
-
-    def set_cookie(self, name: str, value, exp=3600):
-        self._session[name] = value
-
-
-class FastAPIRedirect(Redirect):
-    """Redirect object returned by get_redirect() — used by pylti1p3 internally."""
-
-    def __init__(self, location: str):
-        self._location = location
-
-    def do_redirect(self) -> Response:
-        return RedirectResponse(url=self._location, status_code=302)
-
-    def do_js_redirect(self) -> Response:
-        # JS redirect works inside iframes where HTTP redirects are blocked
-        html = f'<script>window.location="{self._location}";</script>'
-        return HTMLResponse(content=html)
-
-    def set_redirect_url(self, location: str):
-        self._location = location
-
-    def get_redirect_url(self) -> str:
-        return self._location
-
-
-class FastAPIOIDCLogin(OIDCLogin):
-    def get_redirect(self, url: str) -> FastAPIRedirect:
-        return FastAPIRedirect(url)
-
-    def get_response(self, html: str) -> Response:
-        return HTMLResponse(content=html)
-
-
-class FastAPIMessageLaunch(MessageLaunch):
-    pass
-
-
-# ── Tool config loader ────────────────────────────────────────────────────────
+# ── Tool config ────────────────────────────────────────────────────────────────
 
 def get_tool_conf() -> ToolConfDict:
     path = os.path.join(os.path.dirname(__file__), "lti_config.json")
@@ -129,96 +35,74 @@ def get_tool_conf() -> ToolConfDict:
             })
 
     tool_conf = ToolConfDict(config)
-
     for iss, entries in raw.items():
         for entry in entries:
-            client_id   = entry["client_id"]
-            private_key = entry.get("private_key", "")
-            public_key  = entry.get("public_key", "")
-            if private_key:
-                tool_conf.set_private_key(iss, private_key, client_id=client_id)
-            if public_key:
-                tool_conf.set_public_key(iss, public_key, client_id=client_id)
+            client_id = entry["client_id"]
+            if entry.get("private_key"):
+                tool_conf.set_private_key(iss, entry["private_key"], client_id=client_id)
+            if entry.get("public_key"):
+                tool_conf.set_public_key(iss, entry["public_key"], client_id=client_id)
 
     return tool_conf
 
 
-# ── Health & Root ─────────────────────────────────────────────────────────────
+# ── Health & Root ──────────────────────────────────────────────────────────────
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "service": "AGLMS API", "version": "0.1.0"}
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok", "service": "AGLMS API", "version": "0.1.0"})
 
 
-@app.get("/")
+@app.route("/")
 def root():
-    return {"message": "AGLMS API is running", "docs": "/docs", "health": "/health"}
+    return jsonify({"message": "AGLMS API is running", "docs": "/health"})
 
 
-# ── LTI 1.3 Endpoints ─────────────────────────────────────────────────────────
+# ── LTI 1.3 ───────────────────────────────────────────────────────────────────
 
-@app.get("/lti/jwks")
+@app.route("/lti/jwks")
 def jwks():
-    return JSONResponse(get_tool_conf().get_jwks())
+    return jsonify(get_tool_conf().get_jwks())
 
 
-@app.get("/lti/login")
-@app.post("/lti/login")
-async def lti_login(request: Request):
-    session = request.session
-    body = {}
-    if request.method == "POST":
-        form = await request.form()
-        body = dict(form)
-
-    lti_request = FastAPILTIRequest(request, session, body)
-    session_service = SessionService(lti_request)
-    cookie_service = FastAPICookieService(session)
-
-    try:
-        oidc = FastAPIOIDCLogin(
-            lti_request, get_tool_conf(),
-            session_service=session_service,
-            cookie_service=cookie_service,
-        )
-        # js_redirect=True is required for iframe context — HTTP redirects are blocked cross-origin
-        return oidc.redirect("https://api.compcode.cloud/lti/launch", js_redirect=True)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"OIDC login error: {str(e)}")
+@app.route("/lti/login", methods=["GET", "POST"])
+def lti_login():
+    tool_conf = get_tool_conf()
+    flask_request = FlaskRequest()
+    session_service = FlaskSessionService(flask_request)
+    cookie_service = FlaskCookieService(flask_request)
+    oidc = FlaskOIDCLogin(flask_request, tool_conf,
+                          session_service=session_service,
+                          cookie_service=cookie_service)
+    return oidc.redirect("https://api.compcode.cloud/lti/launch", js_redirect=True)
 
 
-@app.post("/lti/launch")
-async def lti_launch(request: Request):
-    session = request.session
-    form = await request.form()
-    body = dict(form)
+@app.route("/lti/launch", methods=["POST"])
+def lti_launch():
+    tool_conf = get_tool_conf()
+    flask_request = FlaskRequest()
+    session_service = FlaskSessionService(flask_request)
+    cookie_service = FlaskCookieService(flask_request)
 
-    lti_request = FastAPILTIRequest(request, session, body)
-    session_service = SessionService(lti_request)
-    cookie_service = FastAPICookieService(session)
+    launch = FlaskMessageLaunch(flask_request, tool_conf,
+                                session_service=session_service,
+                                cookie_service=cookie_service)
+    launch_data = launch.get_launch_data()
 
-    try:
-        launch = FastAPIMessageLaunch(
-            lti_request, get_tool_conf(),
-            session_service=session_service,
-            cookie_service=cookie_service,
-        )
-        launch_data = launch.get_launch_data()
+    user_name  = launch_data.get("name", "Student")
+    user_email = launch_data.get("email", "")
+    user_id    = launch_data.get("sub", str(uuid.uuid4()))
+    course     = launch_data.get(
+        "https://purl.imsglobal.org/spec/lti/claim/context", {}
+    ).get("title", "Course")
+    roles = launch_data.get("https://purl.imsglobal.org/spec/lti/claim/roles", [])
+    is_instructor = any("Instructor" in r or "Administrator" in r for r in roles)
 
-        user_name = launch_data.get("name", "Student")
-        user_email = launch_data.get("email", "")
-        user_id = launch_data.get("sub", str(uuid.uuid4()))
-        course = launch_data.get(
-            "https://purl.imsglobal.org/spec/lti/claim/context", {}
-        ).get("title", "Course")
-        roles = launch_data.get("https://purl.imsglobal.org/spec/lti/claim/roles", [])
-        is_instructor = any("Instructor" in r or "Administrator" in r for r in roles)
+    role_label = "👩‍🏫 Instructor" if is_instructor else "🎓 Student"
+    role_bg    = "#dcfce7" if is_instructor else "#fef3c7"
+    role_color = "#166534" if is_instructor else "#92400e"
 
-        role_label = "👩‍🏫 Instructor" if is_instructor else "🎓 Student"
-        role_bg    = "#dcfce7" if is_instructor else "#fef3c7"
-        role_color = "#166534" if is_instructor else "#92400e"
-
-        html = f"""<!DOCTYPE html>
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
@@ -277,7 +161,7 @@ async def lti_launch(request: Request):
   </div>
 </body>
 </html>"""
-        return HTMLResponse(content=html)
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"LTI launch error: {str(e)}")
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000, debug=False)
